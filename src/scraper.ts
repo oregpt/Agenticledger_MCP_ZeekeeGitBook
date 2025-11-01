@@ -58,6 +58,7 @@ function createAxiosInstance(options?: ScraperOptions): AxiosInstance {
 
 /**
  * Extract navigation structure from GitBook page
+ * Now with sitemap.xml support for complete page discovery
  */
 export async function extractNavigation(
   baseUrl: string,
@@ -66,76 +67,179 @@ export async function extractNavigation(
   const axiosInstance = createAxiosInstance(options);
 
   try {
-    const response = await axiosInstance.get(baseUrl);
-    const html = response.data;
-    const $ = cheerio.load(html);
+    // Strategy 1: Try to get sitemap.xml (most reliable for GitBook)
+    let navigation: NavigationItem[] = await extractFromSitemap(baseUrl, axiosInstance);
 
-    // Try to find navigation in script tags (GitBook often embeds JSON data)
-    let navigation: NavigationItem[] = [];
-
-    // Look for __GITBOOK_DATA__ or similar embedded JSON
-    $('script').each((_, element) => {
-      const scriptContent = $(element).html();
-      if (scriptContent && scriptContent.includes('gitbook')) {
-        // Try to extract JSON data
-        try {
-          // GitBook embeds navigation data in various formats
-          // Attempt to parse navigation from script content
-          const matches = scriptContent.match(/pages['"]\s*:\s*(\[[\s\S]*?\])/);
-          if (matches && matches[1]) {
-            const pagesData = JSON.parse(matches[1]);
-            navigation = parseGitBookPages(pagesData);
-            return false; // Stop iteration
-          }
-        } catch (e) {
-          // Continue searching
-        }
-      }
-    });
-
-    // Fallback: Parse sidebar navigation from HTML
+    // Strategy 2: If sitemap fails, try HTML parsing
     if (navigation.length === 0) {
-      const sidebarNav = $('nav[aria-label="Table of contents"], aside nav, .sidebar nav, [data-testid="page.navigation"]');
+      const response = await axiosInstance.get(baseUrl);
+      const html = response.data;
+      const $ = cheerio.load(html);
 
-      if (sidebarNav.length > 0) {
-        sidebarNav.find('a').each((_, link) => {
+      // Look for __GITBOOK_DATA__ or similar embedded JSON
+      $('script').each((_, element) => {
+        const scriptContent = $(element).html();
+        if (scriptContent && scriptContent.includes('gitbook')) {
+          // Try to extract JSON data
+          try {
+            // GitBook embeds navigation data in various formats
+            // Attempt to parse navigation from script content
+            const matches = scriptContent.match(/pages['"]\s*:\s*(\[[\s\S]*?\])/);
+            if (matches && matches[1]) {
+              const pagesData = JSON.parse(matches[1]);
+              navigation = parseGitBookPages(pagesData);
+              return false; // Stop iteration
+            }
+          } catch (e) {
+            // Continue searching
+          }
+        }
+      });
+
+      // Fallback: Parse sidebar navigation from HTML
+      if (navigation.length === 0) {
+        // Try multiple strategies to find navigation
+
+        // Look for aside elements (GitBook often uses this)
+        let navLinks = $('aside a[href^="/"]');
+
+        // If no aside, try nav elements
+        if (navLinks.length === 0) {
+          navLinks = $('nav a[href^="/"]');
+        }
+
+        // If still nothing, try all internal links
+        if (navLinks.length === 0) {
+          navLinks = $('a[href^="/"]');
+        }
+
+        // Extract all links
+        navLinks.each((_, link) => {
           const $link = $(link);
           const href = $link.attr('href');
           const title = $link.text().trim();
 
-          if (title && href) {
+          if (title && href && href !== '/') {
             const fullUrl = normalizeUrl(baseUrl, href);
-            navigation.push({
-              title,
-              href: fullUrl,
-              type: 'page'
-            });
+            // Skip duplicates and non-content links
+            if (fullUrl && !fullUrl.includes('#') && !fullUrl.includes('javascript:')) {
+              navigation.push({
+                title,
+                href: fullUrl,
+                type: 'page'
+              });
+            }
           }
         });
       }
     }
 
-    // If still no navigation found, try main content links
-    if (navigation.length === 0) {
-      $('main a, article a').each((_, link) => {
-        const $link = $(link);
-        const href = $link.attr('href');
-        const title = $link.text().trim();
-
-        if (href && title && href.startsWith('/')) {
-          const fullUrl = normalizeUrl(baseUrl, href);
-          navigation.push({
-            title,
-            href: fullUrl,
-            type: 'page'
-          });
-        }
-      });
-    }
-
     return deduplicateNavigation(navigation);
   } catch (error) {
     throw new Error(`Failed to extract navigation from ${baseUrl}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+/**
+ * Extract navigation from sitemap.xml
+ */
+async function extractFromSitemap(
+  baseUrl: string,
+  axiosInstance: AxiosInstance
+): Promise<NavigationItem[]> {
+  const navigation: NavigationItem[] = [];
+
+  try {
+    // Try sitemap.xml first
+    const sitemapUrl = new URL('/sitemap.xml', baseUrl).toString();
+    const response = await axiosInstance.get(sitemapUrl);
+    const xml = response.data;
+
+    // Parse XML to find URLs
+    // Look for <loc> tags
+    const locMatches = xml.match(/<loc>([^<]+)<\/loc>/g);
+
+    if (locMatches && locMatches.length > 0) {
+      // Check if this is a sitemap index (points to other sitemaps)
+      if (xml.includes('sitemapindex')) {
+        // This is a sitemap index, fetch the actual page sitemaps
+        const sitemapUrls = locMatches.map((match: string) =>
+          match.replace(/<\/?loc>/g, '')
+        );
+
+        // Fetch each sitemap
+        for (const sitemapUrl of sitemapUrls) {
+          try {
+            const subResponse = await axiosInstance.get(sitemapUrl);
+            const subXml = subResponse.data;
+            const subLocMatches = subXml.match(/<loc>([^<]+)<\/loc>/g);
+
+            if (subLocMatches) {
+              subLocMatches.forEach((match: string) => {
+                const url = match.replace(/<\/?loc>/g, '');
+                const title = extractTitleFromUrl(url, baseUrl);
+                navigation.push({
+                  title,
+                  href: url,
+                  type: 'page'
+                });
+              });
+            }
+          } catch (e) {
+            // Skip failed sitemaps
+            console.error(`Failed to fetch sitemap ${sitemapUrl}:`, e instanceof Error ? e.message : String(e));
+          }
+        }
+      } else {
+        // This is a direct sitemap with URLs
+        locMatches.forEach((match: string) => {
+          const url = match.replace(/<\/?loc>/g, '');
+          const title = extractTitleFromUrl(url, baseUrl);
+          navigation.push({
+            title,
+            href: url,
+            type: 'page'
+          });
+        });
+      }
+    }
+  } catch (error) {
+    // Sitemap not found or error, return empty array to try other methods
+    console.error('Sitemap extraction failed:', error instanceof Error ? error.message : String(error));
+  }
+
+  return navigation;
+}
+
+/**
+ * Extract a reasonable title from URL path
+ */
+function extractTitleFromUrl(url: string, baseUrl: string): string {
+  try {
+    const urlObj = new URL(url);
+    const path = urlObj.pathname;
+
+    // Remove base path and trailing slash
+    const relativePath = path.replace(/^\/|\/$/g, '');
+
+    if (!relativePath) {
+      return 'Home';
+    }
+
+    // Get the last segment of the path
+    const segments = relativePath.split('/');
+    const lastSegment = segments[segments.length - 1];
+
+    // Convert kebab-case or snake_case to Title Case
+    const title = lastSegment
+      .replace(/[-_]/g, ' ')
+      .split(' ')
+      .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+      .join(' ');
+
+    return title;
+  } catch (e) {
+    return url;
   }
 }
 
