@@ -1,0 +1,48 @@
+{
+  "name": "@agenticledger/zeekee-gitbook-mcp-server",
+  "version": "1.0.0",
+  "description": "ZeekeeGitbook MCP Server for AgenticLedger Platform - Scrape and extract content from GitBook documentation sites",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "prepare": "npm run build",
+    "test": "node tests/integration-test.js",
+    "test:integration": "node tests/integration-test.js",
+    "test:zircuit": "node tests/test-zircuit.js"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "gitbook",
+    "documentation",
+    "scraping",
+    "web-scraping",
+    "zircuit",
+    "agenticledger",
+    "ai-agent"
+  ],
+  "author": "AgenticLedger Team",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/oregpt/Agenticledger_MCP_ZeekeeGitbook.git"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "axios": "^1.6.0",
+    "cheerio": "^1.0.0-rc.12",
+    "zod": "^3.24.1",
+    "zod-to-json-schema": "^3.22.4",
+    "turndown": "^7.1.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/turndown": "^5.0.4",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
